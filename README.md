@@ -32,7 +32,7 @@ Both macros accept the same four named arguments for specifying the generated na
 The following case styles are supported:
 
 | Case style        | `case =`         | Example   |
-|-------------------|------------------|-----------|
+| ----------------- | ---------------- | --------- |
 | Upper camel case  | `"upper_camel"`  | `FooBar`  |
 | Lower camel case  | `"lower_camel"`  | `fooBar`  |
 | Snake case        | `"snake"`        | `foo_bar` |
@@ -58,6 +58,48 @@ assert_eq!(_return_five(), 5);
 // This obtains the name of the function using the macro arguments from above, and calls it
 let five = renamed!(name = "return-five", case = "snake", prefix = "_")();
 assert_eq!(five, 5);
+```
+
+Here's a concrete example, a declarative macro that defines setters for struct members:
+
+```rust
+macro_rules! struct_with_setters {
+    (
+        // Match a normal struct definition
+        struct $name:ident {
+            $($member:ident: $ty:ty),* $(,)?
+        }
+    ) => {
+        // Emit the same struct definition
+        struct $name {
+            $($member: $ty,)*
+        }
+
+        // Additionally emit an impl block with a setter function for each member
+        impl $name {
+            $(
+                #[::rename_item::rename(name($member), prefix = "set_")]
+                fn foo(&mut self, val: $ty) {
+                    self.$member = val;
+                }
+            )*
+        }
+    };
+}
+
+struct_with_setters! {
+    struct Highscore {
+        score:  i32,
+        player: String,
+    }
+}
+
+let mut h = Highscore {
+    score:  42,
+    player: "Hackerman".into(),
+};
+h.set_score(9001);
+assert_eq!(h.score, 9001);
 ```
 
 ## License
