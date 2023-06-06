@@ -7,7 +7,10 @@ use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::ToTokens;
-use syn::{parse_macro_input, parse_str, AttributeArgs, Ident, Item, Lit, Meta, NestedMeta};
+use syn::{
+    parse::{discouraged::Speculative, Parse},
+    parse_macro_input, parse_str, AttributeArgs, ForeignItem, Ident, Item, Lit, Meta, NestedMeta,
+};
 
 /// Changes the name of the annotated item.
 ///
@@ -40,7 +43,7 @@ use syn::{parse_macro_input, parse_str, AttributeArgs, Ident, Item, Lit, Meta, N
 pub fn rename(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attribute and item
     let args = parse_macro_input!(attr as AttributeArgs);
-    let mut item = parse_macro_input!(item as Item);
+    let mut item = parse_macro_input!(item as InputItem);
 
     // Convert macro input to target name
     let name = MacroInput::from_list(&args).and_then(|input| input.into_name(Some(&item)));
@@ -206,23 +209,34 @@ impl FromMeta for Words {
 
 impl MacroInput {
     /// Concatenates words and adjusts to case style
-    fn into_name(self, item: Option<&Item>) -> darling::Result<String> {
+    fn into_name(self, item: Option<&InputItem>) -> darling::Result<String> {
         // Infer default case style from type of `item`
         let case = match self.case {
             Some(case) => case,
             None => match item {
-                Some(Item::Fn(_) | Item::Mod(_)) => Ok(CaseStyle::Snake),
+                Some(InputItem::Foreign(foreign)) => match foreign {
+                    ForeignItem::Fn(_) => Ok(CaseStyle::Snake),
 
-                Some(
+                    ForeignItem::Type(_) => Ok(CaseStyle::UpperCamel),
+
+                    ForeignItem::Static(_) => Ok(CaseStyle::ShoutySnake),
+
+                    _ => Err(darling::Error::custom("Unable to infer default case style")),
+                },
+                Some(InputItem::Regular(regular)) => match regular {
+                    Item::Fn(_) | Item::Mod(_) => Ok(CaseStyle::Snake),
+
                     Item::Enum(_)
                     | Item::Struct(_)
                     | Item::Trait(_)
                     | Item::TraitAlias(_)
                     | Item::Type(_)
-                    | Item::Union(_),
-                ) => Ok(CaseStyle::UpperCamel),
+                    | Item::Union(_) => Ok(CaseStyle::UpperCamel),
 
-                Some(Item::Const(_) | Item::Static(_)) => Ok(CaseStyle::ShoutySnake),
+                    Item::Const(_) | Item::Static(_) => Ok(CaseStyle::ShoutySnake),
+
+                    _ => Err(darling::Error::custom("Unable to infer default case style")),
+                },
 
                 _ => Err(darling::Error::custom("Unable to infer default case style")),
             }?,
@@ -244,26 +258,80 @@ impl MacroInput {
     }
 }
 
-/// Sets the identifier of an [`Item`]
-fn set_ident(item: &mut Item, ident: Ident) -> darling::Result<()> {
+/// Sets the identifier of an [`InputItem`]
+fn set_ident(item: &mut InputItem, ident: Ident) -> darling::Result<()> {
     match *item {
-        Item::Const(ref mut i) => i.ident = ident,
-        Item::Enum(ref mut i) => i.ident = ident,
-        Item::ExternCrate(ref mut i) => i.ident = ident,
-        Item::Fn(ref mut i) => i.sig.ident = ident,
-        Item::Mod(ref mut i) => i.ident = ident,
-        Item::Static(ref mut i) => i.ident = ident,
-        Item::Struct(ref mut i) => i.ident = ident,
-        Item::Trait(ref mut i) => i.ident = ident,
-        Item::TraitAlias(ref mut i) => i.ident = ident,
-        Item::Type(ref mut i) => i.ident = ident,
-        Item::Union(ref mut i) => i.ident = ident,
+        InputItem::Foreign(ref mut foreign) => match foreign {
+            ForeignItem::Fn(ref mut i) => i.sig.ident = ident,
+            ForeignItem::Static(ref mut i) => i.ident = ident,
+            ForeignItem::Type(ref mut i) => i.ident = ident,
 
-        _ => {
-            return Err(darling::Error::custom("Unsupported item type"));
-        }
+            _ => {
+                return Err(darling::Error::custom("Unsupported foreign-item type"));
+            }
+        },
+        InputItem::Regular(ref mut regular) => match regular {
+            Item::Const(ref mut i) => i.ident = ident,
+            Item::Enum(ref mut i) => i.ident = ident,
+            Item::ExternCrate(ref mut i) => i.ident = ident,
+            Item::Fn(ref mut i) => i.sig.ident = ident,
+            Item::Mod(ref mut i) => i.ident = ident,
+            Item::Static(ref mut i) => i.ident = ident,
+            Item::Struct(ref mut i) => i.ident = ident,
+            Item::Trait(ref mut i) => i.ident = ident,
+            Item::TraitAlias(ref mut i) => i.ident = ident,
+            Item::Type(ref mut i) => i.ident = ident,
+            Item::Union(ref mut i) => i.ident = ident,
+
+            _ => {
+                return Err(darling::Error::custom("Unsupported item type"));
+            }
+        },
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum InputItem {
+    Foreign(ForeignItem),
+    Regular(Item),
+}
+
+impl From<ForeignItem> for InputItem {
+    fn from(item: ForeignItem) -> Self {
+        Self::Foreign(item)
+    }
+}
+
+impl From<Item> for InputItem {
+    fn from(item: Item) -> Self {
+        Self::Regular(item)
+    }
+}
+
+impl Parse for InputItem {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ahead = input.fork();
+
+        if let Ok(item) = ForeignItem::parse(&ahead) {
+            input.advance_to(&ahead);
+            Ok(Self::Foreign(item))
+        } else if let Ok(item) = Item::parse(&ahead) {
+            input.advance_to(&ahead);
+            Ok(Self::Regular(item))
+        } else {
+            Err(input.error("unsupported item type"))
+        }
+    }
+}
+
+impl ToTokens for InputItem {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            Self::Foreign(item) => item.to_tokens(tokens),
+            Self::Regular(item) => item.to_tokens(tokens),
+        }
+    }
 }
 
 /// Additional compile-fail tests, as doctests for convenience:
