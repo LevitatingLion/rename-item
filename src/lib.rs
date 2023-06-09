@@ -7,7 +7,10 @@ use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::ToTokens;
-use syn::{parse_macro_input, parse_str, AttributeArgs, Ident, Item, Lit, Meta, NestedMeta};
+use syn::{
+    parse::{discouraged::Speculative, Parse},
+    parse_macro_input, parse_str, AttributeArgs, ForeignItem, Ident, Item, Lit, Meta, NestedMeta,
+};
 
 /// Changes the name of the annotated item.
 ///
@@ -40,7 +43,7 @@ use syn::{parse_macro_input, parse_str, AttributeArgs, Ident, Item, Lit, Meta, N
 pub fn rename(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attribute and item
     let args = parse_macro_input!(attr as AttributeArgs);
-    let mut item = parse_macro_input!(item as Item);
+    let mut item = parse_macro_input!(item as InputItem);
 
     // Convert macro input to target name
     let name = MacroInput::from_list(&args).and_then(|input| input.into_name(Some(&item)));
@@ -206,27 +209,38 @@ impl FromMeta for Words {
 
 impl MacroInput {
     /// Concatenates words and adjusts to case style
-    fn into_name(self, item: Option<&Item>) -> darling::Result<String> {
+    fn into_name(self, item: Option<&InputItem>) -> darling::Result<String> {
         // Infer default case style from type of `item`
-        let case = match self.case {
-            Some(case) => case,
-            None => match item {
-                Some(Item::Fn(_) | Item::Mod(_)) => Ok(CaseStyle::Snake),
+        let case = self.case.or(match item {
+            Some(InputItem::Regular(regular)) => match regular {
+                Item::Fn(_) | Item::Mod(_) => Some(CaseStyle::Snake),
 
-                Some(
-                    Item::Enum(_)
-                    | Item::Struct(_)
-                    | Item::Trait(_)
-                    | Item::TraitAlias(_)
-                    | Item::Type(_)
-                    | Item::Union(_),
-                ) => Ok(CaseStyle::UpperCamel),
+                Item::Enum(_)
+                | Item::Struct(_)
+                | Item::Trait(_)
+                | Item::TraitAlias(_)
+                | Item::Type(_)
+                | Item::Union(_) => Some(CaseStyle::UpperCamel),
 
-                Some(Item::Const(_) | Item::Static(_)) => Ok(CaseStyle::ShoutySnake),
+                Item::Const(_) | Item::Static(_) => Some(CaseStyle::ShoutySnake),
 
-                _ => Err(darling::Error::custom("Unable to infer default case style")),
-            }?,
-        };
+                _ => None,
+            },
+
+            Some(InputItem::Foreign(foreign)) => match foreign {
+                ForeignItem::Fn(_) => Some(CaseStyle::Snake),
+
+                ForeignItem::Type(_) => Some(CaseStyle::UpperCamel),
+
+                ForeignItem::Static(_) => Some(CaseStyle::ShoutySnake),
+
+                _ => None,
+            },
+
+            _ => None,
+        });
+        let case =
+            case.ok_or_else(|| darling::Error::custom("Unable to infer default case style"))?;
 
         // Concatenate words. Insert `_` to ensure word boundary between words.
         let name = self.name.0.join("_");
@@ -244,26 +258,77 @@ impl MacroInput {
     }
 }
 
-/// Sets the identifier of an [`Item`]
-fn set_ident(item: &mut Item, ident: Ident) -> darling::Result<()> {
+/// Sets the identifier of an [`InputItem`]
+fn set_ident(item: &mut InputItem, ident: Ident) -> darling::Result<()> {
     match *item {
-        Item::Const(ref mut i) => i.ident = ident,
-        Item::Enum(ref mut i) => i.ident = ident,
-        Item::ExternCrate(ref mut i) => i.ident = ident,
-        Item::Fn(ref mut i) => i.sig.ident = ident,
-        Item::Mod(ref mut i) => i.ident = ident,
-        Item::Static(ref mut i) => i.ident = ident,
-        Item::Struct(ref mut i) => i.ident = ident,
-        Item::Trait(ref mut i) => i.ident = ident,
-        Item::TraitAlias(ref mut i) => i.ident = ident,
-        Item::Type(ref mut i) => i.ident = ident,
-        Item::Union(ref mut i) => i.ident = ident,
+        InputItem::Regular(ref mut regular) => match regular {
+            Item::Const(ref mut i) => i.ident = ident,
+            Item::Enum(ref mut i) => i.ident = ident,
+            Item::ExternCrate(ref mut i) => i.ident = ident,
+            Item::Fn(ref mut i) => i.sig.ident = ident,
+            Item::Mod(ref mut i) => i.ident = ident,
+            Item::Static(ref mut i) => i.ident = ident,
+            Item::Struct(ref mut i) => i.ident = ident,
+            Item::Trait(ref mut i) => i.ident = ident,
+            Item::TraitAlias(ref mut i) => i.ident = ident,
+            Item::Type(ref mut i) => i.ident = ident,
+            Item::Union(ref mut i) => i.ident = ident,
 
-        _ => {
-            return Err(darling::Error::custom("Unsupported item type"));
-        }
+            _ => {
+                return Err(darling::Error::custom("Unsupported item type"));
+            }
+        },
+
+        InputItem::Foreign(ref mut foreign) => match foreign {
+            ForeignItem::Fn(ref mut i) => i.sig.ident = ident,
+            ForeignItem::Static(ref mut i) => i.ident = ident,
+            ForeignItem::Type(ref mut i) => i.ident = ident,
+
+            _ => {
+                return Err(darling::Error::custom("Unsupported foreign-item type"));
+            }
+        },
     }
     Ok(())
+}
+
+/// An item we can rename: either a regular or a foreign item
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum InputItem {
+    /// A regular item, not inside an `extern` block
+    Regular(Item),
+    /// A foreign item, inside an `extern` block
+    Foreign(ForeignItem),
+}
+
+impl Parse for InputItem {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let ahead = input.fork();
+
+        if let Some(item) = Item::parse(&ahead)
+            .ok()
+            .filter(|it| !matches!(it, Item::Verbatim(_)))
+        {
+            input.advance_to(&ahead);
+            Ok(Self::Regular(item))
+        } else if let Some(item) = ForeignItem::parse(input)
+            .ok()
+            .filter(|it| !matches!(it, ForeignItem::Verbatim(_)))
+        {
+            Ok(Self::Foreign(item))
+        } else {
+            Err(input.error("unsupported item type"))
+        }
+    }
+}
+
+impl ToTokens for InputItem {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            Self::Regular(item) => item.to_tokens(tokens),
+            Self::Foreign(item) => item.to_tokens(tokens),
+        }
+    }
 }
 
 /// Additional compile-fail tests, as doctests for convenience:
@@ -299,8 +364,78 @@ fn set_ident(item: &mut Item, ident: Ident) -> darling::Result<()> {
 /// #[rename(name = "foo", case = "nonexistent")]
 /// fn foo() {}
 /// ```
+///
+/// Also test renaming of all possible types of items:
+///
+/// ```
+/// use rename_item::rename;
+///
+/// extern "C" {
+///     // Foreign fn
+///     #[rename(name = "my-ffn")]
+///     fn foo() -> i32;
+///
+///     // Foreign static
+///     #[rename(name = "my-fs")]
+///     static foo: i32;
+/// }
+///
+/// // Const
+/// #[rename(name = "my-const")]
+/// const foo: i32 = 1;
+/// assert_eq!(MY_CONST, 1);
+///
+/// // Enum
+/// #[rename(name = "my-enum")]
+/// enum foo {
+///     A,
+///     B,
+/// }
+/// MyEnum::A;
+///
+/// // Fn
+/// #[rename(name = "my-fn")]
+/// fn foo(_: i32) {}
+/// my_fn(1);
+///
+/// // Mod
+/// #[rename(name = "my-mod")]
+/// mod foo {
+///     pub const A: i32 = 1;
+/// }
+/// assert_eq!(my_mod::A, 1);
+///
+/// // Static
+/// #[rename(name = "my-static")]
+/// static foo: i32 = 1;
+/// assert_eq!(MY_STATIC, 1);
+///
+/// // Struct
+/// #[rename(name = "my-struct")]
+/// struct foo {
+///     a: i32,
+/// }
+/// MyStruct { a: 1 };
+///
+/// // Trait
+/// #[rename(name = "my-trait")]
+/// trait foo {}
+/// impl MyTrait for i32 {}
+///
+/// // Type
+/// #[rename(name = "my-type")]
+/// type foo = i32;
+/// let _: MyType = 1;
+///
+/// // Union
+/// #[rename(name = "my-union")]
+/// union foo {
+///     a: i32,
+/// }
+/// MyUnion { a: 1 };
+/// ```
 #[cfg(doctest)]
-struct CompileFailTests;
+struct AdditionalTests;
 
 #[cfg(test)]
 mod tests {
