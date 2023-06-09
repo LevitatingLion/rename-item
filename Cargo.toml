@@ -1,6 +1,6 @@
 [package]
 name = "rename-item"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 repository = "https://github.com/levitatinglion/rename-item/"
