@@ -2,14 +2,14 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-use darling::FromMeta;
+use darling::{ast::NestedMeta, FromMeta};
 use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::ToTokens;
 use syn::{
     parse::{discouraged::Speculative, Parse},
-    parse_macro_input, parse_str, AttributeArgs, ForeignItem, Ident, Item, Lit, Meta, NestedMeta,
+    parse_macro_input, parse_str, ForeignItem, Ident, Item, Lit, Meta,
 };
 
 /// Changes the name of the annotated item.
@@ -40,9 +40,14 @@ use syn::{
 /// assert_eq!(_MyConstant, 2);
 /// ```
 #[proc_macro_attribute]
-pub fn rename(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn rename(args: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attribute and item
-    let args = parse_macro_input!(attr as AttributeArgs);
+    let args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return e.into_compile_error().into();
+        }
+    };
     let mut item = parse_macro_input!(item as InputItem);
 
     // Convert macro input to target name
@@ -106,9 +111,14 @@ pub fn rename(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// renamed!(name = "foo")
 /// ```
 #[proc_macro]
-pub fn renamed(attr: TokenStream) -> TokenStream {
+pub fn renamed(args: TokenStream) -> TokenStream {
     // Parse attribute
-    let args = parse_macro_input!(attr as AttributeArgs);
+    let args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return e.into_compile_error().into();
+        }
+    };
 
     // Convert macro input to target name
     let name = MacroInput::from_list(&args).and_then(|input| input.into_name(None));
