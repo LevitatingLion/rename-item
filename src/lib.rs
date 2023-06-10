@@ -134,7 +134,7 @@ pub fn renamed(args: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Input to the [`rename`] and [`renamed`] macros
+/// Input to the [`macro@rename`] and [`renamed!`] macros
 #[derive(Debug, FromMeta)]
 struct MacroInput {
     /// Case style used to build the output string
