@@ -1,7 +1,7 @@
 name: CI
 on: [push, pull_request]
 jobs:
-  test:
+  nightly:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -12,7 +12,9 @@ jobs:
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
+          profile: minimal
+          components: rustfmt, clippy
           override: true
       - name: Run clippy
         uses: actions-rs/cargo@v1
@@ -28,6 +30,22 @@ jobs:
         with:
           command: doc
           args: --no-deps --document-private-items
+      - name: Run tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+  stable:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
       - name: Run tests
         uses: actions-rs/cargo@v1
         with:
